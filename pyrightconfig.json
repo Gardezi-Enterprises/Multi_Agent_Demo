@@ -1,0 +1,6 @@
+{
+  "//": "The Python code runs from backend/ (uvicorn's CWD); tell the type checker.",
+  "include": ["backend"],
+  "extraPaths": ["backend"],
+  "exclude": ["**/node_modules", "**/__pycache__", "frontend", "backend/static"]
+}

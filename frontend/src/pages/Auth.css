@@ -1,0 +1,40 @@
+.auth-wrap {
+  min-height: 100dvh; display: grid; place-items: center; padding: 1.5rem;
+}
+.auth-card {
+  width: 100%; max-width: 392px; padding: 2.5rem 2rem 2rem; border-radius: var(--r4);
+  text-align: center; background: var(--glass); border: 1px solid var(--line);
+  backdrop-filter: blur(28px) saturate(160%); -webkit-backdrop-filter: blur(28px) saturate(160%);
+  box-shadow: var(--shadow); animation: rise 0.6s var(--ease) both;
+}
+.auth-card .brand-mark { display: flex; justify-content: center; margin-bottom: 1rem; }
+.auth-card h1 {
+  font-size: var(--t-xl); font-weight: 650; letter-spacing: -0.03em; margin: 0 0 0.25rem;
+  background: linear-gradient(120deg, var(--fg), var(--a1) 130%);
+  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+}
+.auth-card .sub { color: var(--fg-3); font-size: var(--t-sm); margin: 0 0 1.75rem; }
+.auth-card form { display: flex; flex-direction: column; gap: 0.75rem; text-align: left; }
+.auth-card label { font-size: var(--t-xs); font-weight: 600; color: var(--fg-2); margin-bottom: -0.4rem; }
+.auth-card input {
+  width: 100%; padding: 0.75rem 0.9rem; border-radius: var(--r2); background: var(--glass);
+  border: 1px solid var(--line); color: var(--fg); outline: none;
+  transition: border-color var(--fast) var(--ease), box-shadow var(--fast) var(--ease);
+}
+.auth-card input:focus { border-color: var(--a1); box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.16); }
+.auth-card button.primary {
+  margin-top: 0.5rem; padding: 0.8rem; border-radius: var(--r2); font-weight: 600;
+  color: var(--on-accent); background: linear-gradient(120deg, var(--a1), var(--a2));
+  transition: transform var(--fast) var(--ease), box-shadow var(--mid) var(--ease);
+}
+.auth-card button.primary:hover:not(:disabled) { transform: translateY(-1px); box-shadow: var(--glow); }
+.auth-card button.primary:active:not(:disabled) { transform: translateY(0) scale(0.985); }
+.auth-card button.primary:disabled { opacity: 0.6; cursor: not-allowed; }
+.auth-card .err {
+  margin: 0; padding: 0.7rem 0.9rem; border-radius: var(--r2); font-size: var(--t-sm);
+  color: var(--err); border: 1px solid var(--err); background: var(--glass);
+  animation: shake 0.4s var(--ease); text-align: left;
+}
+.auth-card .foot { margin: 1.5rem 0 0; font-size: var(--t-sm); color: var(--fg-3); }
+.auth-card .foot a { color: var(--a1); text-decoration: none; font-weight: 600; }
+.auth-card .foot a:hover { text-decoration: underline; }

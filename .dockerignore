@@ -1,0 +1,17 @@
+**/__pycache__/
+**/*.py[cod]
+**/.venv/
+**/venv/
+**/node_modules/
+frontend/dist/
+backend/static/
+backend/.env
+backend/*.db
+backend/*.db-wal
+backend/*.db-shm
+backend/output/
+backend/uploads/
+backend/data/
+.git/
+.claude/
+*.md

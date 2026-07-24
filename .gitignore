@@ -1,0 +1,23 @@
+# secrets & data
+backend/.env
+backend/*.db
+backend/*.db-wal
+backend/*.db-shm
+backend/output/
+backend/uploads/
+backend/data/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# node / build
+node_modules/
+frontend/dist/
+backend/static/
+
+# misc
+.DS_Store

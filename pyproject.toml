@@ -1,0 +1,18 @@
+[project]
+name = "taseers-agent"
+version = "1.0.0"
+description = "Agentic multi-agent system on the Google Gen AI SDK (FastAPI + React)"
+requires-python = ">=3.10"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["backend"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
+pythonpath = ["backend"]
