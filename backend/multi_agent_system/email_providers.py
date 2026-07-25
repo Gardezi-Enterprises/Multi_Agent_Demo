@@ -50,11 +50,20 @@ def _split(value: Optional[str]) -> List[str]:
 
 
 def _post_json(url: str, payload: dict, headers: dict) -> Tuple[bool, str]:
-    """POST JSON and normalise the outcome into (ok, detail)."""
+    """POST JSON and normalise the outcome into (ok, detail).
+
+    A real User-Agent is sent because provider APIs sit behind Cloudflare, which
+    blocks urllib's default "Python-urllib/x.y" signature with a 403 (error 1010).
+    """
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", **headers},
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "TaseersAgent/1.0 (+https://github.com/Gardezi-Enterprises/Multi_Agent_Demo)",
+            **headers,
+        },
         method="POST",
     )
     try:
