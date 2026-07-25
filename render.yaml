@@ -1,28 +1,33 @@
-# Render blueprint — https://render.com/docs/blueprint-spec
-# Builds the multi-stage Dockerfile (React SPA + FastAPI) into one service.
+# Render blueprint — FREE tier.
+# Runs the Docker image (React SPA + FastAPI) on Render's free web service.
+# Data lives in a free managed Postgres (Neon/Supabase), NOT on a Render disk —
+# so there is no disk cost and nothing is lost when a free instance sleeps.
+#
+# You MUST set DATABASE_URL to your Neon connection string (Render will prompt
+# for it below, along with the other secrets). Without it the app would fall
+# back to an ephemeral SQLite file that resets on restart.
 services:
   - type: web
     name: taseers-agent
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: starter          # 512 MB; free instances sleep and lose session state
+    plan: free             # $0 — free instances sleep after ~15 min idle
     healthCheckPath: /api/health
     envVars:
       - key: ENVIRONMENT
         value: production
       - key: LOG_FORMAT
         value: json
+      # --- database: paste your Neon postgres:// URL when prompted ---
       - key: DATABASE_URL
-        value: sqlite:///data/multi_agent.db
-      - key: OUTPUT_DIR
-        value: data/output
-      - key: UPLOAD_DIR
-        value: data/uploads
+        sync: false        # e.g. postgresql://user:pass@ep-xxx.neon.tech/neondb?sslmode=require
       - key: GOOGLE_API_KEY
-        sync: false        # set in the dashboard, never in git
+        sync: false
       # --- auth (required in production) ---
       - key: AUTH_ENABLED
         value: "true"
+      - key: AUTH_ALLOW_SIGNUP
+        value: "true"      # new users can register from anywhere
       - key: AUTH_USERNAME
         sync: false
       - key: AUTH_PASSWORD_HASH
@@ -31,11 +36,7 @@ services:
         generateValue: true
       - key: COOKIE_SECURE
         value: "true"
-      # Open self-service signup so new users anywhere can register.
-      # Optionally gate it with a shared code by setting AUTH_SIGNUP_CODE.
-      - key: AUTH_ALLOW_SIGNUP
-        value: "true"
-      # --- email ---
+      # --- email (optional) ---
       - key: EMAIL_ENABLED
         value: "true"
       - key: EMAIL_PROVIDER
@@ -50,7 +51,3 @@ services:
         sync: false
       - key: SMTP_PASSWORD
         sync: false
-    disk:
-      name: data           # SQLite + generated documents survive restarts
-      mountPath: /app/data
-      sizeGB: 1
