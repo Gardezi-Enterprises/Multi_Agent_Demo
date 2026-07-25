@@ -7,7 +7,7 @@ Neon, it survives even on hosts that wipe their disk — nothing is stored local
 
 ```
    Free host (compute)                Free database
-   HF Spaces / Koyeb / Render  ─────▶  Neon Postgres
+   Render / Koyeb / Cloud Run  ─────▶  Neon Postgres
    (the container)                     (your data, persistent)
 ```
 
@@ -52,38 +52,45 @@ environment variables on whichever host you choose:
 
 No `DATABASE_URL` disk/volume is needed — the data is in Neon.
 
-### Option A — Hugging Face Spaces  (free, no card) ★ recommended
+> **Note:** Hugging Face Spaces now require a **paid PRO plan** for Docker/compute
+> Spaces (only Static Spaces are free, and those can't run a backend). Use one of
+> the options below instead.
 
-1. [huggingface.co](https://huggingface.co) → **New Space** → **Docker** (blank).
-2. In the Space's **README.md**, put this frontmatter so it serves on port 8000:
-   ```yaml
-   ---
-   title: Taseer's Agent
-   sdk: docker
-   app_port: 8000
-   ---
-   ```
-3. Push this repo's files to the Space (or connect the GitHub repo).
-4. **Settings → Variables and secrets** → add the env vars from the table above
-   (put `GOOGLE_API_KEY`, `DATABASE_URL`, `AUTH_PASSWORD_HASH`, `SECRET_KEY`,
-   `SMTP_PASSWORD` as **Secrets**).
-5. It builds and serves at `https://<user>-<space>.hf.space`. Open it, sign up.
+### Option A — Render  (free web service, no card) ★ recommended
 
-### Option B — Koyeb  (free web service, no card)
+Render's **free web service** runs the Docker image at no cost. The disk is what
+costs money — and you don't need it, because your data is in Neon.
+
+1. [render.com](https://render.com) → **New +** → **Web Service** → connect this repo.
+2. Runtime **Docker** · Instance type **Free** · leave the Dockerfile path default.
+   **Do not add a disk.**
+3. **Environment** → add the env vars from the table above (`DATABASE_URL` = your
+   Neon string, `GOOGLE_API_KEY`, `AUTH_PASSWORD_HASH`, `SECRET_KEY`, etc.).
+4. **Create Web Service** → it builds and serves at `https://<name>.onrender.com`.
+   Open it, sign up (you become the admin).
+
+Free instances **sleep after ~15 min idle** (≈30–50 s cold start on the next
+visit) but **never lose data** — everything is in Neon. Do **not** use the
+`render.yaml` blueprint for the free path (it defines a paid disk); create the
+service manually as above.
+
+### Option B — Koyeb  (free web service)
 
 1. [koyeb.com](https://koyeb.com) → **Create Web Service** → GitHub → this repo.
-2. Builder: **Dockerfile**. Port: **8000**.
+2. Builder: **Dockerfile**. Port: **8000**. Instance: **Free** (nano).
 3. Add the env vars from the table. Deploy → you get a `*.koyeb.app` URL.
 
-### Option C — Render  (free tier now works, because data is in Neon)
+### Option C — Google Cloud Run  (generous free tier; requires a card)
 
-Render's free plan wipes its own disk, but with `DATABASE_URL` pointing at Neon
-that no longer matters — your data is in Neon.
+Scales to zero, 60-min request limit, no data loss (data is in Neon).
 
-1. New → **Web Service** → this repo → runtime **Docker**, **Free** plan.
-2. Add the env vars from the table (skip the disk; you don't need it with Neon).
-3. Deploy. Note: free instances **sleep after 15 min** (≈30 s cold start), but
-   never lose data now.
+```bash
+gcloud run deploy taseers-agent --source . --region us-central1 \
+  --allow-unauthenticated --min-instances 0 \
+  --set-env-vars ENVIRONMENT=production,AUTH_ENABLED=true,AUTH_ALLOW_SIGNUP=true,COOKIE_SECURE=true \
+  --set-env-vars "DATABASE_URL=<your-neon-url>" \
+  --set-secrets GOOGLE_API_KEY=gemini:latest,AUTH_PASSWORD_HASH=admin-hash:latest,SECRET_KEY=secret:latest
+```
 
 ### Option D — Fly.io  (free allowance; requires a card)
 

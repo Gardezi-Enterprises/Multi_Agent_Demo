@@ -219,7 +219,7 @@ requests/day).
 ## Deployment
 
 **Want it live for free?** See **[DEPLOY_FREE.md](DEPLOY_FREE.md)** — a
-free host (Hugging Face Spaces / Koyeb / Render) + a free Neon Postgres, with your
+free host (Render / Koyeb / Cloud Run) + a free Neon Postgres, with your
 data persisted and no local machine involved.
 
 ### Not Vercel (for the backend)
