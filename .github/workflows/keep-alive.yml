@@ -1,0 +1,36 @@
+name: Keep Render awake
+
+# Render's free web service sleeps after ~15 minutes of inactivity. This pings
+# the public health endpoint every 10 minutes so the next real visitor never
+# waits for a cold start. It hits only /api/health (no auth, no data touched).
+
+on:
+  schedule:
+    - cron: "*/10 * * * *" # every 10 minutes (UTC)
+  workflow_dispatch: {} # allow a manual run from the Actions tab
+
+# If a run is still going when the next fires, skip rather than pile up.
+concurrency:
+  group: keep-alive
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping health endpoint
+        env:
+          URL: https://taseers-agent.onrender.com/api/health
+        run: |
+          for attempt in 1 2 3 4; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 90 "$URL") || code=000
+            echo "attempt $attempt -> HTTP $code"
+            if [ "$code" = "200" ]; then
+              echo "service is awake"
+              exit 0
+            fi
+            # First hit after sleep triggers the wake; give it time, then retry.
+            sleep 25
+          done
+          echo "did not get 200 (service may still be waking); not failing the job"
+          exit 0
