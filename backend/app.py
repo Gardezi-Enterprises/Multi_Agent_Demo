@@ -18,7 +18,8 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from multi_agent_system import accounts, auth, commands, config
+from multi_agent_system import accounts, auth, commands, config, conversations
+from multi_agent_system.agents.master_agent import MasterAgent
 from multi_agent_system.tools import email_tools
 from multi_agent_system.config import (
     ALLOWED_UPLOAD_SUFFIXES,
@@ -50,6 +51,11 @@ SAFE_NAME_TABLE = str.maketrans({c: "_" for c in '<>:"/\\|?*\0'})
 STARTED_AT = time.time()
 turn_limiter = RateLimiter(RATE_LIMIT_TURNS, RATE_LIMIT_WINDOW)
 login_limiter = auth.AttemptLimiter(config.AUTH_MAX_ATTEMPTS, config.AUTH_LOCKOUT)
+
+# One orchestrator shared across requests. It holds no per-request state: each
+# turn runs against a history rebuilt from the caller's stored conversation, so
+# concurrent users never touch each other's context.
+orchestrator = MasterAgent()
 
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
@@ -223,6 +229,15 @@ class ResetBody(BaseModel):
 class ChatBody(BaseModel):
     message: str = ""
     files: list[str] = []
+    conversation_id: str = ""
+
+
+class ConversationCreate(BaseModel):
+    title: str = "New chat"
+
+
+class ConversationRename(BaseModel):
+    title: str = Field(min_length=1, max_length=80)
 
 
 # --- health & meta -----------------------------------------------------------
@@ -444,23 +459,53 @@ def remove_account(username: str, admin: dict = Depends(require_admin)):
     return {"status": "ok"}
 
 
-# --- reset -------------------------------------------------------------------
+# --- conversations (per-user chat history) ----------------------------------
 
 
-@app.post("/api/reset")
-def reset(request: Request, response: Response, _: dict = Depends(require_user)):
-    session = get_session(request, response)
-    store.reset(session.id)
+@app.get("/api/conversations")
+def list_conversations(account: dict = Depends(require_user)):
+    return {"conversations": conversations.list_for(account["username"])}
+
+
+@app.post("/api/conversations")
+def create_conversation(body: ConversationCreate, account: dict = Depends(require_user)):
+    return conversations.create(account["username"], body.title)
+
+
+@app.get("/api/conversations/{conversation_id}")
+def get_conversation(conversation_id: str, account: dict = Depends(require_user)):
+    messages = conversations.get_messages(account["username"], conversation_id)
+    if messages is None:
+        raise HTTPException(404, "Conversation not found")
+    return {"id": conversation_id, "messages": messages}
+
+
+@app.patch("/api/conversations/{conversation_id}")
+def rename_conversation(conversation_id: str, body: ConversationRename,
+                        account: dict = Depends(require_user)):
+    if not conversations.set_title(account["username"], conversation_id, body.title):
+        raise HTTPException(404, "Conversation not found")
     return {"status": "ok"}
+
+
+@app.delete("/api/conversations/{conversation_id}")
+def delete_conversation(conversation_id: str, account: dict = Depends(require_user)):
+    if not conversations.delete(account["username"], conversation_id):
+        raise HTTPException(404, "Conversation not found")
+    return {"status": "ok"}
+
+
+@app.post("/api/conversations/clear")
+def clear_conversations(account: dict = Depends(require_user)):
+    removed = conversations.clear_all(account["username"])
+    return {"status": "ok", "removed": removed}
 
 
 # --- files -------------------------------------------------------------------
 
 
 @app.post("/api/upload")
-async def upload(request: Request, response: Response,
-                 file: UploadFile = File(...), _: dict = Depends(require_user)):
-    get_session(request, response)
+async def upload(file: UploadFile = File(...), _: dict = Depends(require_user)):
     raw = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(raw) > MAX_UPLOAD_BYTES:
         raise HTTPException(413, f"File exceeds the {MAX_UPLOAD_BYTES // (1024*1024)} MB limit.")
@@ -515,27 +560,32 @@ def _sse(payload: dict) -> bytes:
 
 
 @app.post("/api/chat/stream")
-async def chat_stream(body: ChatBody, request: Request, response: Response,
-                      account: dict = Depends(require_user)):
-    session = get_session(request, response)
+async def chat_stream(body: ChatBody, account: dict = Depends(require_user)):
+    owner = account["username"]
     message = (body.message or "").strip()
     files = [f for f in (body.files or []) if f]
     if not message and not files:
         raise HTTPException(400, "Message is empty.")
     if len(message) > MAX_MESSAGE_CHARS:
         raise HTTPException(413, f"Message exceeds {MAX_MESSAGE_CHARS} characters.")
-    if not turn_limiter.allow(session.id):
+    if not turn_limiter.allow(owner):
         raise HTTPException(
             429, f"Rate limit reached ({RATE_LIMIT_TURNS} messages per "
             f"{RATE_LIMIT_WINDOW}s). Please wait a moment.")
+
+    # Resolve the target conversation, enforcing ownership. An unknown or
+    # someone-else's id never resolves — a fresh conversation is created instead,
+    # so a user can only ever write to their own history.
+    conv_id = body.conversation_id.strip()
+    if not conv_id or not conversations.owns(owner, conv_id):
+        conv_id = conversations.create(owner)["id"]
+    prior = conversations.get_messages(owner, conv_id) or []
 
     loop = asyncio.get_running_loop()
     bridge: asyncio.Queue = asyncio.Queue()
     result: dict = {}
     started = time.monotonic()
 
-    # The agent turn is synchronous and runs in a worker thread; its trace
-    # callback hands events back to the event loop thread-safely.
     def emit(item):
         loop.call_soon_threadsafe(bridge.put_nowait, item)
 
@@ -544,24 +594,26 @@ async def chat_stream(body: ChatBody, request: Request, response: Response,
     def run_turn():
         try:
             prompt = build_message(message, files)
-            with session.lock:
-                session.turns += 1
-                result["answer"] = session.agent.chat(prompt, trace=trace)
+            history = conversations.build_history(prior)
+            # Serialise turns on the same conversation; different conversations
+            # (and different users) run concurrently against their own history.
+            with conversations.lock_for(conv_id):
+                result["answer"] = orchestrator.run(prompt, history=history, trace=trace)
         except Exception as exc:  # noqa: BLE001 - reported to the client generically
             result["error"] = str(exc)
-            log.error("chat turn failed session=%s", session.id[:8], exc_info=True)
+            log.error("chat turn failed conv=%s", conv_id[:10], exc_info=True)
         finally:
             emit(("done", None))
 
     async def stream():
-        yield _sse({"type": "start"})
+        yield _sse({"type": "start", "conversation_id": conv_id})
         worker = loop.run_in_executor(None, run_turn)
         try:
             while True:
                 try:
                     kind, event = await asyncio.wait_for(bridge.get(), timeout=20)
                 except asyncio.TimeoutError:
-                    yield _sse({"type": "ping"})  # keep proxies from timing out
+                    yield _sse({"type": "ping"})
                     continue
                 if kind == "done":
                     break
@@ -569,16 +621,23 @@ async def chat_stream(body: ChatBody, request: Request, response: Response,
                     yield _sse({"type": "trace", "event": event_to_json(event)})
             await worker
             if "error" in result:
-                yield _sse({"type": "error",
+                yield _sse({"type": "error", "conversation_id": conv_id,
                             "error": "The assistant could not complete this request.",
                             "error_id": secrets.token_hex(6)})
             else:
-                yield _sse({"type": "done", "answer": result.get("answer", ""),
-                            "trace": [event_to_json(e) for e in trace if e.kind != "final"],
-                            "downloads": downloads_from_trace(trace)})
+                answer = result.get("answer", "")
+                final_trace = [event_to_json(e) for e in trace if e.kind != "final"]
+                downloads = downloads_from_trace(trace)
+                # Persist the turn to the owner's conversation.
+                conversations.add_message(conv_id, "user", message)
+                conversations.add_message(conv_id, "assistant", answer,
+                                          trace=final_trace, downloads=downloads)
+                conversations.title_if_default(owner, conv_id, message.replace("/", " ").strip()[:60])
+                yield _sse({"type": "done", "conversation_id": conv_id, "answer": answer,
+                            "trace": final_trace, "downloads": downloads})
         finally:
             await worker  # ensure the turn finishes even if the client disconnects
-        log.info("chat session=%s turns=%d %dms", session.id[:8], session.turns,
+        log.info("chat owner=%s conv=%s %dms", owner, conv_id[:10],
                  int((time.monotonic() - started) * 1000))
 
     return StreamingResponse(stream(), media_type="text/event-stream",

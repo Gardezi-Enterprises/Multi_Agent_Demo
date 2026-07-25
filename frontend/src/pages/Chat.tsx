@@ -1,5 +1,13 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, streamChat, ApiError, type Command, type Download, type TraceEvent } from "../api";
+import {
+  api,
+  streamChat,
+  ApiError,
+  type Command,
+  type ConversationSummary,
+  type Download,
+  type TraceEvent,
+} from "../api";
 import { renderMarkdown } from "../markdown";
 import { Aurora, TreeLogo } from "../components/TreeLogo";
 import { AccountModal } from "../components/AccountModal";
@@ -18,17 +26,12 @@ interface StagedFile {
   size: string;
   readable?: boolean;
 }
-interface Msg {
+interface UiMsg {
   role: "me" | "them";
   text: string;
   files?: { name: string; size?: string }[];
   steps?: TraceEvent[];
   downloads?: Download[];
-}
-interface Thread {
-  id: string;
-  title: string;
-  msgs: Msg[];
 }
 
 const PRETTY: Record<string, string> = {
@@ -62,21 +65,11 @@ const PICKS = [
   ["Email everyone", "One message to every person on record", "/broadcast the new portal is live from Monday"],
 ];
 
-// Threads are stored per user so a different sign-in on the same browser never
-// sees the previous user's conversations.
-const threadsKey = (username: string) => `ta.threads:${username.toLowerCase()}`;
-
-function loadThreads(username: string): Thread[] {
-  try {
-    return JSON.parse(localStorage.getItem(threadsKey(username)) || "[]");
-  } catch {
-    return [];
-  }
-}
-
 export function Chat({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
-  const [threads, setThreads] = useState<Thread[]>(() => loadThreads(me.username));
-  const [currentId, setCurrentId] = useState<string | null>(threads[0]?.id ?? null);
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [currentId, setCurrentId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<UiMsg[]>([]);
+  const [liveSteps, setLiveSteps] = useState<TraceEvent[]>([]);
   const [commands, setCommands] = useState<Command[]>([]);
   const [tab, setTab] = useState<"chats" | "guide">("chats");
   const [sidebarHidden, setSidebarHidden] = useState(window.innerWidth <= 860);
@@ -87,56 +80,76 @@ export function Chat({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
   const [palIdx, setPalIdx] = useState(0);
   const [dragging, setDragging] = useState(false);
 
-  const feedRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const toast = useToast();
 
-  const persist = useCallback(
-    (next: Thread[]) => {
-      try {
-        localStorage.setItem(threadsKey(me.username), JSON.stringify(next.slice(0, 40)));
-      } catch {
-        /* ignore */
-      }
-    },
-    [me.username],
-  );
-
-  useEffect(() => {
-    api.meta().then((m) => setCommands(m.commands)).catch(() => toast("Could not reach the server", "err"));
-  }, [toast]);
-
-  const current = threads.find((t) => t.id === currentId) || null;
-
-  // Stable so the memoised Message rows don't re-render on every keystroke.
   const handleCopy = useCallback(() => toast("Copied", "ok"), [toast]);
-
   const scrollDown = useCallback(() => {
     const s = scrollRef.current;
     if (s) s.scrollTop = s.scrollHeight;
   }, []);
-  useEffect(scrollDown, [current?.msgs.length, scrollDown]);
+  useEffect(scrollDown, [messages.length, liveSteps.length, scrollDown]);
 
-  function updateThreads(next: Thread[]) {
-    setThreads(next);
-    persist(next);
+  const refreshList = useCallback(async () => {
+    try {
+      const r = await api.listConversations();
+      setConversations(r.conversations);
+      return r.conversations;
+    } catch {
+      return [];
+    }
+  }, []);
+
+  // Load this user's conversations from the server on mount. Nothing is read
+  // from the browser, so a different sign-in never sees prior history.
+  useEffect(() => {
+    api.meta().then((m) => setCommands(m.commands)).catch(() => toast("Could not reach the server", "err"));
+    refreshList();
+  }, [refreshList, toast]);
+
+  function toUiMessages(stored: { role: string; content: string; trace: TraceEvent[]; downloads: Download[] }[]): UiMsg[] {
+    return stored.map((m) =>
+      m.role === "user"
+        ? { role: "me", text: m.content }
+        : { role: "them", text: m.content, steps: m.trace, downloads: m.downloads },
+    );
+  }
+
+  async function openConversation(id: string) {
+    if (window.innerWidth <= 860) setSidebarHidden(true);
+    try {
+      const r = await api.getConversation(id);
+      setCurrentId(id);
+      setMessages(toUiMessages(r.messages));
+    } catch {
+      toast("Could not open that conversation", "err");
+      refreshList();
+    }
   }
 
   function newChat() {
-    const t: Thread = { id: "t" + Date.now().toString(36), title: "New chat", msgs: [] };
-    const next = [t, ...threads].slice(0, 40);
-    updateThreads(next);
-    setCurrentId(t.id);
-    api.reset().catch(() => {});
+    // The conversation is created server-side on the first message, so a blank
+    // "New chat" never persists an empty row.
+    setCurrentId(null);
+    setMessages([]);
+    setLiveSteps([]);
     if (window.innerWidth <= 860) setSidebarHidden(true);
+    inputRef.current?.focus();
   }
 
-  function deleteThread(id: string) {
-    const next = threads.filter((t) => t.id !== id);
-    updateThreads(next);
-    if (currentId === id) setCurrentId(next[0]?.id ?? null);
+  async function removeConversation(id: string) {
+    try {
+      await api.deleteConversation(id);
+    } catch {
+      /* ignore */
+    }
+    const next = await refreshList();
+    if (id === currentId) {
+      if (next.length) openConversation(next[0].id);
+      else newChat();
+    }
   }
 
   // slash palette
@@ -175,70 +188,57 @@ export function Chat({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
     const value = (text ?? input).trim();
     if (!value || busy) return;
 
-    let thread = current;
-    let workingThreads = threads;
-    if (!thread) {
-      thread = { id: "t" + Date.now().toString(36), title: "New chat", msgs: [] };
-      workingThreads = [thread, ...threads];
-      setCurrentId(thread.id);
-      api.reset().catch(() => {});
-    }
     const files = staged.slice();
-    const userMsg: Msg = { role: "me", text: value, files: files.map((f) => ({ name: f.name, size: f.size })) };
-    thread = {
-      ...thread,
-      title: thread.title === "New chat" ? value.replace(/^\/\w+\s*/, "").slice(0, 42) || value.slice(0, 42) : thread.title,
-      msgs: [...thread.msgs, userMsg],
-    };
-    const applied = workingThreads.map((t) => (t.id === thread!.id ? thread! : t));
-    updateThreads(applied);
+    const userMsg: UiMsg = { role: "me", text: value, files: files.map((f) => ({ name: f.name, size: f.size })) };
+    setMessages((m) => [...m, userMsg]);
     setInput("");
     setStaged([]);
+    setLiveSteps([]);
     setBusy(true);
 
     const collected: TraceEvent[] = [];
     const ctl = new AbortController();
     abortRef.current = ctl;
-
-    // Live placeholder message we mutate as frames arrive.
-    let live: Msg = { role: "them", text: "", steps: [] };
-    const pushLive = () => {
-      thread = { ...thread!, msgs: [...thread!.msgs.filter((m) => m !== live), live] };
-    };
+    let convId = currentId ?? "";
+    let failed = false;
 
     try {
-      for await (const frame of streamChat(value, files.map((f) => f.path), ctl.signal)) {
-        if (frame.type === "trace") {
+      for await (const frame of streamChat(value, files.map((f) => f.path), currentId ?? "", ctl.signal)) {
+        if (frame.type === "start") {
+          convId = frame.conversation_id;
+        } else if (frame.type === "trace") {
           collected.push(frame.event);
-          live = { ...live, steps: [...collected] };
+          setLiveSteps([...collected]);
         } else if (frame.type === "done") {
-          live = {
-            role: "them",
-            text: frame.answer,
-            steps: frame.trace?.length ? frame.trace : collected,
-            downloads: frame.downloads,
-          };
+          convId = frame.conversation_id;
+          setMessages((m) => [
+            ...m,
+            {
+              role: "them",
+              text: frame.answer,
+              steps: frame.trace?.length ? frame.trace : collected,
+              downloads: frame.downloads,
+            },
+          ]);
         } else if (frame.type === "error") {
-          live = { role: "them", text: "", steps: collected };
+          failed = true;
           toast(frame.error, "err");
-        } else {
-          continue;
         }
-        pushLive();
-        setThreads((prev) => prev.map((t) => (t.id === thread!.id ? thread! : t)));
-        scrollDown();
       }
-      persist(threads.map((t) => (t.id === thread!.id ? thread! : t)));
     } catch (err) {
+      failed = true;
       if (!(err instanceof DOMException && err.name === "AbortError")) {
         toast(err instanceof ApiError ? err.message : "Something went wrong", "err");
       }
-      // drop the empty live placeholder on abort/failure
-      thread = { ...thread!, msgs: thread!.msgs.filter((m) => m !== live || m.text) };
-      setThreads((prev) => prev.map((t) => (t.id === thread!.id ? thread! : t)));
     } finally {
       setBusy(false);
+      setLiveSteps([]);
       abortRef.current = null;
+      // Adopt the server-assigned conversation id and refresh the sidebar so a
+      // brand-new chat appears with its generated title.
+      if (convId && convId !== currentId) setCurrentId(convId);
+      refreshList();
+      if (failed) setMessages((m) => (m[m.length - 1]?.role === "me" ? m.slice(0, -1) : m));
       inputRef.current?.focus();
     }
   }
@@ -278,6 +278,8 @@ export function Chat({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
     window.addEventListener("keydown", onEsc);
     return () => window.removeEventListener("keydown", onEsc);
   }, [busy]);
+
+  const showHero = !currentId && messages.length === 0;
 
   return (
     <div
@@ -326,15 +328,12 @@ export function Chat({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
         {tab === "chats" ? (
           <div className="pane">
             <div className="pane-label">Recent</div>
-            {threads.length === 0 && <div className="muted">Nothing yet — ask something to begin.</div>}
-            {threads.map((t) => (
+            {conversations.length === 0 && <div className="muted">Nothing yet — ask something to begin.</div>}
+            {conversations.map((t) => (
               <button
                 key={t.id}
                 className={"thread" + (t.id === currentId ? " active" : "")}
-                onClick={() => {
-                  setCurrentId(t.id);
-                  if (window.innerWidth <= 860) setSidebarHidden(true);
-                }}
+                onClick={() => openConversation(t.id)}
               >
                 <span className="bullet" />
                 <span>{t.title}</span>
@@ -345,7 +344,7 @@ export function Chat({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
                   aria-label="Delete"
                   onClick={(e) => {
                     e.stopPropagation();
-                    deleteThread(t.id);
+                    removeConversation(t.id);
                   }}
                 >
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
@@ -403,7 +402,7 @@ export function Chat({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
               <path d="M3 6h18M3 12h18M3 18h18" />
             </svg>
           </button>
-          <div className="title">{current?.title ?? "New chat"}</div>
+          <div className="title">{conversations.find((c) => c.id === currentId)?.title ?? "New chat"}</div>
           <button className="ico" aria-label="Switch theme" onClick={toggleTheme}>
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
               <path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z" />
@@ -412,8 +411,8 @@ export function Chat({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
         </header>
 
         <div className="scroll" ref={scrollRef}>
-          <div className="feed" ref={feedRef}>
-            {!current?.msgs.length ? (
+          <div className="feed">
+            {showHero ? (
               <div className="hero">
                 <div className="big">
                   <TreeLogo size={76} />
@@ -430,8 +429,9 @@ export function Chat({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
                 </div>
               </div>
             ) : (
-              current.msgs.map((m, i) => <Message key={i} msg={m} onCopy={handleCopy} />)
+              messages.map((m, i) => <Message key={i} msg={m} onCopy={handleCopy} />)
             )}
+            {busy && liveSteps.length > 0 && <Steps events={liveSteps} />}
             {busy && (
               <div className="think">
                 <span className="dots">
@@ -543,7 +543,7 @@ export function Chat({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
 // Defined at module scope (not nested in Chat) so its identity is stable across
 // renders — otherwise every keystroke would remount the whole message list and
 // the screen would flicker.
-const Message = memo(function Message({ msg, onCopy }: { msg: Msg; onCopy: () => void }) {
+const Message = memo(function Message({ msg, onCopy }: { msg: UiMsg; onCopy: () => void }) {
   if (msg.role === "me") {
     return (
       <div className="turn mine">

@@ -120,10 +120,11 @@ cd backend && python main.py "list all users"
 
 ```bash
 cd backend
-python tests/test_tools.py      # 38 — tool layer
-python tests/test_runtime.py    # 36 — sessions, config, serving helpers, auth
-python tests/test_accounts.py   #  8 — account store lifecycle
-python tests/test_api.py        # 12 — FastAPI routes, gating, SSE contract
+python tests/test_tools.py          # 41 — tool layer
+python tests/test_runtime.py        # 36 — sessions, config, serving helpers, auth
+python tests/test_accounts.py       # 13 — account store lifecycle
+python tests/test_conversations.py  #  9 — per-user chat history isolation
+python tests/test_api.py            # 17 — routes, gating, SSE, ownership
 ```
 
 ---
@@ -188,6 +189,13 @@ does auth, sessions, streaming and file transfer.
 **Streaming.** `/api/chat/stream` runs the synchronous agent turn in a worker
 thread; its trace list pushes each delegation and tool call to the event loop
 thread-safely, and `StreamingResponse` emits SSE frames the browser renders live.
+
+**Per-user chat history.** Conversations live in the database (`conversations`
+and `messages`), owned by the account. Every query is scoped to the signed-in
+owner, so a user only ever sees their own chats — even an admin gets a 404 for
+someone else's conversation id. History persists across logout/login and
+devices; nothing is kept in the browser. Each turn rebuilds the agent's context
+from the stored conversation, so concurrent users never share memory.
 
 **Generic, not hardcoded.** `analyze_resume_text` has no fixed skill or department
 list — it categorises any profession (a cardiologist as "Cardiology", a chef as

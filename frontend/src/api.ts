@@ -40,6 +40,19 @@ export interface Download {
   size: string;
 }
 
+export interface ConversationSummary {
+  id: string;
+  title: string;
+  updated_at: string;
+}
+
+export interface StoredMessage {
+  role: "user" | "assistant";
+  content: string;
+  trace: TraceEvent[];
+  downloads: Download[];
+}
+
 export class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -96,7 +109,16 @@ export const api = {
       body: JSON.stringify({ token, new_password }),
     }),
   meta: () => request<{ commands: Command[] }>("/api/meta"),
-  reset: () => request("/api/reset", { method: "POST", body: "{}" }),
+  listConversations: () =>
+    request<{ conversations: ConversationSummary[] }>("/api/conversations"),
+  createConversation: () =>
+    request<ConversationSummary>("/api/conversations", { method: "POST", body: "{}" }),
+  getConversation: (id: string) =>
+    request<{ id: string; messages: StoredMessage[] }>(
+      `/api/conversations/${encodeURIComponent(id)}`,
+    ),
+  deleteConversation: (id: string) =>
+    request(`/api/conversations/${encodeURIComponent(id)}`, { method: "DELETE" }),
   listAccounts: () => request<{ accounts: Account[] }>("/api/accounts"),
   createAccount: (username: string, password: string, is_admin: boolean) =>
     request<Account>("/api/accounts", {
@@ -116,23 +138,24 @@ export const api = {
 };
 
 export type StreamFrame =
-  | { type: "start" }
+  | { type: "start"; conversation_id: string }
   | { type: "ping" }
   | { type: "trace"; event: TraceEvent }
-  | { type: "done"; answer: string; trace: TraceEvent[]; downloads: Download[] }
-  | { type: "error"; error: string; error_id?: string };
+  | { type: "done"; conversation_id: string; answer: string; trace: TraceEvent[]; downloads: Download[] }
+  | { type: "error"; conversation_id?: string; error: string; error_id?: string };
 
 // Stream a chat turn, yielding each SSE frame as it arrives.
 export async function* streamChat(
   message: string,
   files: string[],
+  conversationId: string,
   signal: AbortSignal,
 ): AsyncGenerator<StreamFrame> {
   const res = await fetch("/api/chat/stream", {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message, files }),
+    body: JSON.stringify({ message, files, conversation_id: conversationId }),
     signal,
   });
   if (!res.ok) {

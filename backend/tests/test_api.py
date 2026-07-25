@@ -61,7 +61,7 @@ class TestApiAuth(unittest.TestCase):
         c = fresh_client()
         for method, path in [
             ("get", "/api/meta"),
-            ("post", "/api/reset"),
+            ("get", "/api/conversations"),
             ("get", "/api/accounts"),
             ("get", "/api/download?f=x.docx"),
         ]:
@@ -104,18 +104,10 @@ class TestApiAuth(unittest.TestCase):
         self.assertEqual(len(c.get("/api/accounts").json()["accounts"]), before + 1)
         self.assertEqual(c.delete("/api/accounts/newbie").status_code, 200)
 
-    def test_login_rotates_the_conversation_session(self):
-        """A new sign-in must not inherit the previous session's chat memory."""
+    def test_conversations_require_auth(self):
         c = fresh_client()
-        c.post("/api/auth/login", json={"username": "boss", "password": "boss-password-1"})
-        first = c.cookies.get(app_module.SESSION_COOKIE)
-        # Establish a session id, then log in again — the session must change.
-        c.post("/api/reset", json={})
-        established = c.cookies.get(app_module.SESSION_COOKIE) or first
-        c.post("/api/auth/login", json={"username": "boss", "password": "boss-password-1"})
-        rotated = c.cookies.get(app_module.SESSION_COOKIE)
-        self.assertIsNotNone(rotated)
-        self.assertNotEqual(rotated, established)
+        self.assertEqual(c.get("/api/conversations").status_code, 401)
+        self.assertEqual(c.post("/api/conversations", json={}).status_code, 401)
 
     def test_admin_cannot_delete_self(self):
         c = fresh_client()
@@ -226,39 +218,75 @@ class TestApiChatStream(unittest.TestCase):
         database.init_db(force=True)
         accounts.create("boss", "boss-password-1", is_admin=True)
 
-    def test_stream_shape_with_stubbed_agent(self):
-        """The SSE contract (start → trace → done) without calling Gemini."""
+    def _stub_orchestrator(self):
+        """Replace the shared agent with a stub so no Gemini call is made."""
         from multi_agent_system.core.runtime import TraceEvent
 
-        c = fresh_client()
-        c.post("/api/auth/login", json={"username": "boss", "password": "boss-password-1"})
-
-        # Login rotates the conversation session, so stub the agent on whichever
-        # session the client now holds (its cookie), not a freshly-minted one.
-        sid = c.cookies.get(app_module.SESSION_COOKIE)
-        session = app_module.store.get_or_create(sid)
-
-        def fake_chat(message, trace=None):
+        def fake_run(message, history=None, trace=None):
             if trace is not None:
                 trace.append(TraceEvent(agent="Master Agent", kind="delegation",
                                         name="delegate_to_user_management_agent", args={}))
             return "Here are the users."
 
-        original = session.agent.chat
-        session.agent.chat = fake_chat
+        original = app_module.orchestrator.run
+        app_module.orchestrator.run = fake_run
+        return original
+
+    def test_stream_shape_and_persistence(self):
+        """SSE contract (start → trace → done) and the turn is persisted."""
+        import json as _json
+
+        c = fresh_client()
+        c.post("/api/auth/login", json={"username": "boss", "password": "boss-password-1"})
+        original = self._stub_orchestrator()
         try:
             with c.stream("POST", "/api/chat/stream", json={"message": "list users"}) as r:
                 self.assertEqual(r.status_code, 200)
-                frames = [line[6:] for line in r.iter_lines() if line.startswith("data: ")]
+                frames = [_json.loads(line[6:]) for line in r.iter_lines() if line.startswith("data: ")]
         finally:
-            session.agent.chat = original
+            app_module.orchestrator.run = original
 
-        import json as _json
-        types = [_json.loads(f)["type"] for f in frames]
+        types = [f["type"] for f in frames]
         self.assertEqual(types[0], "start")
         self.assertIn("done", types)
-        done = _json.loads([f for f in frames if '"done"' in f][-1])
+        done = [f for f in frames if f["type"] == "done"][-1]
         self.assertEqual(done["answer"], "Here are the users.")
+        conv_id = done["conversation_id"]
+
+        # The turn is now stored in the user's conversation history.
+        convs = c.get("/api/conversations").json()["conversations"]
+        self.assertTrue(any(cv["id"] == conv_id for cv in convs))
+        msgs = c.get(f"/api/conversations/{conv_id}").json()["messages"]
+        self.assertEqual([m["role"] for m in msgs], ["user", "assistant"])
+        self.assertEqual(msgs[1]["content"], "Here are the users.")
+
+    def test_users_cannot_see_each_others_conversations(self):
+        """The core isolation guarantee: no cross-user history access."""
+        import json as _json
+
+        accounts.create("carol", "carol-password-1")
+        original = self._stub_orchestrator()
+        try:
+            # Alice's client creates a conversation by chatting.
+            a = fresh_client()
+            a.post("/api/auth/login", json={"username": "boss", "password": "boss-password-1"})
+            with a.stream("POST", "/api/chat/stream", json={"message": "secret alice chat"}) as r:
+                frames = [_json.loads(line[6:]) for line in r.iter_lines() if line.startswith("data: ")]
+            alice_conv = [f for f in frames if f["type"] == "done"][-1]["conversation_id"]
+        finally:
+            app_module.orchestrator.run = original
+
+        # Carol logs in on a separate client.
+        b = fresh_client()
+        b.post("/api/auth/login", json={"username": "carol", "password": "carol-password-1"})
+        # Carol's list does not contain Alice's conversation...
+        carol_convs = b.get("/api/conversations").json()["conversations"]
+        self.assertFalse(any(cv["id"] == alice_conv for cv in carol_convs))
+        # ...and Carol cannot fetch or delete it by id.
+        self.assertEqual(b.get(f"/api/conversations/{alice_conv}").status_code, 404)
+        self.assertEqual(b.delete(f"/api/conversations/{alice_conv}").status_code, 404)
+        # Alice still owns it.
+        self.assertEqual(a.get(f"/api/conversations/{alice_conv}").status_code, 200)
 
 
 if __name__ == "__main__":

@@ -34,6 +34,29 @@ CREATE TABLE IF NOT EXISTS auth_accounts (
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 );
+
+-- Chat history, owned by the operator account (by username). Every query is
+-- scoped to the owner, so no user can ever see another user's conversations.
+CREATE TABLE IF NOT EXISTS conversations (
+    id          TEXT PRIMARY KEY,
+    owner       TEXT NOT NULL COLLATE NOCASE,
+    title       TEXT NOT NULL DEFAULT 'New chat',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_conversations_owner ON conversations(owner, updated_at);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id TEXT NOT NULL,
+    role            TEXT NOT NULL,          -- 'user' | 'assistant'
+    content         TEXT NOT NULL,
+    trace           TEXT,                   -- JSON array, nullable
+    downloads       TEXT,                   -- JSON array, nullable
+    created_at      TEXT NOT NULL,
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, id);
 """
 
 # Additive column migrations for databases created before a column existed.
