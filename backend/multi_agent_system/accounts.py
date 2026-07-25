@@ -51,7 +51,7 @@ def get(username: str) -> Optional[dict]:
     init_db()
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT * FROM auth_accounts WHERE username = ? COLLATE NOCASE",
+            "SELECT * FROM auth_accounts WHERE lower(username) = lower(?)",
             (username.strip(),),
         ).fetchone()
     return row_to_dict(row) if row else None
@@ -63,7 +63,7 @@ def get_by_email(email: str) -> Optional[dict]:
     init_db()
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT * FROM auth_accounts WHERE email = ? COLLATE NOCASE",
+            "SELECT * FROM auth_accounts WHERE lower(email) = lower(?)",
             (email.strip(),),
         ).fetchone()
     return row_to_dict(row) if row else None
@@ -94,12 +94,12 @@ def create(username: str, password: str, is_admin: bool = False, email: Optional
             return {"status": "error", "message": f"That email is already registered."}
         ts = _now()
         with get_connection() as conn:
-            cur = conn.execute(
+            row = conn.execute(
                 "INSERT INTO auth_accounts (username, password_hash, email, is_admin, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
+                " VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
                 (username, auth.hash_password(password), email, 1 if is_admin else 0, ts, ts),
-            )
-            account_id = cur.lastrowid
+            ).fetchone()
+            account_id = row["id"]
     return {
         "status": "success",
         "account": {"id": account_id, "username": username, "email": email, "is_admin": is_admin},
@@ -187,9 +187,10 @@ def ensure_seed_from_env(
     email = (email or "").strip() or None
     if password_hash:
         ts = _now()
+        # Guarded by count()==0 above, so a plain INSERT is safe in both dialects.
         with _guard, get_connection() as conn:
             conn.execute(
-                "INSERT OR IGNORE INTO auth_accounts "
+                "INSERT INTO auth_accounts "
                 "(username, password_hash, email, is_admin, created_at, updated_at) "
                 "VALUES (?, ?, ?, 1, ?, ?)",
                 (username.strip(), password_hash, email, ts, ts),

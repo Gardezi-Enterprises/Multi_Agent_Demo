@@ -45,7 +45,7 @@ def list_for(owner: str) -> List[dict]:
     with get_connection() as conn:
         rows = conn.execute(
             "SELECT id, title, updated_at FROM conversations "
-            "WHERE owner = ? COLLATE NOCASE ORDER BY updated_at DESC, id DESC",
+            "WHERE lower(owner) = lower(?) ORDER BY updated_at DESC, id DESC",
             (owner.strip(),),
         ).fetchall()
     return [row_to_dict(r) for r in rows]
@@ -56,7 +56,7 @@ def owns(owner: str, conversation_id: str) -> bool:
     init_db()
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT 1 FROM conversations WHERE id = ? AND owner = ? COLLATE NOCASE",
+            "SELECT 1 FROM conversations WHERE id = ? AND lower(owner) = lower(?)",
             (conversation_id, owner.strip()),
         ).fetchone()
     return row is not None
@@ -121,7 +121,7 @@ def title_if_default(owner: str, conversation_id: str, title: str) -> None:
     """Set the title only if it is still the default, so the first message names it."""
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT title FROM conversations WHERE id = ? AND owner = ? COLLATE NOCASE",
+            "SELECT title FROM conversations WHERE id = ? AND lower(owner) = lower(?)",
             (conversation_id, owner.strip()),
         ).fetchone()
         if row and row["title"] == "New chat":

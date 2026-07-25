@@ -12,6 +12,8 @@ sub-agent owning typed Python tools, driven by a function-calling loop.
 - **Frontend** — React + Vite + TypeScript single-page app (`frontend/`)
 - **Same-origin** — in production the backend serves the built SPA; in dev, Vite
   proxies `/api`. Cookie auth, no CORS.
+- **SQLite or Postgres** — zero-config SQLite locally; set `DATABASE_URL` to a free
+  managed Postgres (Neon/Supabase) for a fully-online deploy. Same code, both.
 
 ---
 
@@ -215,6 +217,10 @@ requests/day).
 ---
 
 ## Deployment
+
+**Want it live for free?** See **[DEPLOY_FREE.md](DEPLOY_FREE.md)** — a
+free host (Hugging Face Spaces / Koyeb / Render) + a free Neon Postgres, with your
+data persisted and no local machine involved.
 
 ### Not Vercel (for the backend)
 

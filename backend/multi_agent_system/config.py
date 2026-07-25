@@ -25,9 +25,13 @@ API_KEYS = [
 ]
 
 # --- Database ----------------------------------------------------------------
-# Only sqlite is supported; DATABASE_URL is parsed for the file path.
-_db_url = os.getenv("DATABASE_URL", "sqlite:///multi_agent.db").strip()
-DB_PATH = ROOT_DIR / _db_url.replace("sqlite:///", "")
+# SQLite by default (zero-config local dev); Postgres when DATABASE_URL is a
+# postgres:// URL, which is what free managed databases (Neon, Supabase) and
+# most hosts provide. This lets the app run fully online with no local file.
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///multi_agent.db").strip()
+IS_POSTGRES = DATABASE_URL.startswith(("postgres://", "postgresql://"))
+# For sqlite, the URL is just a file path under the project root.
+DB_PATH = ROOT_DIR / DATABASE_URL.replace("sqlite:///", "") if not IS_POSTGRES else None
 
 # --- Email -------------------------------------------------------------------
 # Transport for outgoing mail: dry_run | smtp | resend | sendgrid | brevo.
@@ -230,7 +234,7 @@ def summary() -> dict:
         "email_enabled": EMAIL_ENABLED,
         "email_provider": EMAIL_PROVIDER,
         "email_from": EMAIL_FROM or None,
-        "database": DB_PATH.name,
+        "database": "postgres" if IS_POSTGRES else DB_PATH.name,
         "max_upload_mb": MAX_UPLOAD_BYTES // (1024 * 1024),
         "auth_enabled": AUTH_ENABLED,
     }

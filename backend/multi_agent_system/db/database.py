@@ -1,19 +1,26 @@
-"""SQLite persistence for the user store.
+"""Database layer — SQLite (default) or PostgreSQL.
 
-Kept deliberately small: a single `users` table plus a connection helper. The
-User Management Agent's tools are the only writers.
+The whole app targets one small dialect-agnostic surface: `?` placeholders,
+`RETURNING id` on inserts, and rows that behave like dicts. A thin connection
+wrapper adapts that to either backend, so nothing above this file knows or cares
+which database is in use.
+
+SQLite needs zero configuration and is ideal for local dev. Set DATABASE_URL to a
+`postgres://` URL (e.g. a free Neon or Supabase database) to run fully online
+with no local file.
 """
 
-import sqlite3
 import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from ..config import DB_PATH
+from ..config import DATABASE_URL, DB_PATH, IS_POSTGRES
 
-SCHEMA = """
+# Case-insensitive uniqueness is enforced with expression indexes on lower(),
+# which both engines support — portable, unlike SQLite's COLLATE NOCASE.
+_COMMON_TABLES = """
 CREATE TABLE IF NOT EXISTS users (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    id          {pk},
     name        TEXT NOT NULL,
     email       TEXT NOT NULL UNIQUE,
     phone       TEXT,
@@ -22,56 +29,38 @@ CREATE TABLE IF NOT EXISTS users (
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
-
--- Operator logins. Distinct from `users`, which is domain data the agent
--- manages; these are the people allowed to use the application at all.
 CREATE TABLE IF NOT EXISTS auth_accounts (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    id            {pk},
+    username      TEXT NOT NULL,
     password_hash TEXT NOT NULL,
     email         TEXT,
     is_admin      INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 );
-
--- Chat history, owned by the operator account (by username). Every query is
--- scoped to the owner, so no user can ever see another user's conversations.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_username ON auth_accounts (lower(username));
 CREATE TABLE IF NOT EXISTS conversations (
     id          TEXT PRIMARY KEY,
-    owner       TEXT NOT NULL COLLATE NOCASE,
+    owner       TEXT NOT NULL,
     title       TEXT NOT NULL DEFAULT 'New chat',
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_conversations_owner ON conversations(owner, updated_at);
-
+CREATE INDEX IF NOT EXISTS idx_conversations_owner ON conversations (lower(owner));
 CREATE TABLE IF NOT EXISTS messages (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    id              {pk},
     conversation_id TEXT NOT NULL,
-    role            TEXT NOT NULL,          -- 'user' | 'assistant'
+    role            TEXT NOT NULL,
     content         TEXT NOT NULL,
-    trace           TEXT,                   -- JSON array, nullable
-    downloads       TEXT,                   -- JSON array, nullable
-    created_at      TEXT NOT NULL,
-    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+    trace           TEXT,
+    downloads       TEXT,
+    created_at      TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, id);
+CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages (conversation_id, id);
 """
 
-# Additive column migrations for databases created before a column existed.
-# (CREATE TABLE IF NOT EXISTS won't alter an existing table.)
-MIGRATIONS = {
-    "auth_accounts": {"email": "ALTER TABLE auth_accounts ADD COLUMN email TEXT"},
-}
-
-
-def _apply_migrations(conn: sqlite3.Connection) -> None:
-    for table, columns in MIGRATIONS.items():
-        existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
-        for column, ddl in columns.items():
-            if column not in existing:
-                conn.execute(ddl)
+SCHEMA_SQLITE = _COMMON_TABLES.format(pk="INTEGER PRIMARY KEY AUTOINCREMENT")
+SCHEMA_POSTGRES = _COMMON_TABLES.format(pk="SERIAL PRIMARY KEY")
 
 EDITABLE_FIELDS = ("name", "email", "phone", "department", "skills")
 
@@ -80,17 +69,83 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def get_connection() -> sqlite3.Connection:
-    """Open a connection tuned for concurrent web requests.
+class Row(dict):
+    """A dict row that also supports positional access (row[0]) for scalars."""
 
-    `timeout` makes writers wait for a held lock instead of raising
-    "database is locked" immediately, which is the usual failure once more
-    than one request is in flight.
-    """
-    conn = sqlite3.connect(DB_PATH, timeout=15.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return list(self.values())[key]
+        return super().__getitem__(key)
+
+
+class _Result:
+    def __init__(self, rows: List[Row]):
+        self._rows = rows
+
+    def fetchone(self) -> Optional[Row]:
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self) -> List[Row]:
+        return self._rows
+
+    def __iter__(self):
+        return iter(self._rows)
+
+
+class Connection:
+    """Uniform connection over sqlite3 or psycopg, used as a context manager."""
+
+    def __init__(self):
+        if IS_POSTGRES:
+            import psycopg
+
+            self._raw = psycopg.connect(DATABASE_URL, autocommit=False)
+        else:
+            import sqlite3
+
+            self._raw = sqlite3.connect(DB_PATH, timeout=15.0)
+            self._raw.row_factory = sqlite3.Row
+            self._raw.execute("PRAGMA foreign_keys = ON")
+
+    def execute(self, sql: str, params: tuple = ()) -> _Result:
+        if IS_POSTGRES:
+            cur = self._raw.cursor()
+            cur.execute(sql.replace("?", "%s"), params)
+            rows = (
+                [Row(zip((c.name for c in cur.description), r)) for r in cur.fetchall()]
+                if cur.description
+                else []
+            )
+            cur.close()
+            return _Result(rows)
+        cur = self._raw.execute(sql, params)
+        rows = [Row(dict(r)) for r in cur.fetchall()] if cur.description else []
+        return _Result(rows)
+
+    def executescript(self, script: str) -> None:
+        if IS_POSTGRES:
+            with self._raw.cursor() as cur:
+                for statement in script.split(";"):
+                    if statement.strip():
+                        cur.execute(statement)
+        else:
+            self._raw.executescript(script)
+
+    def __enter__(self) -> "Connection":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        try:
+            if exc_type:
+                self._raw.rollback()
+            else:
+                self._raw.commit()
+        finally:
+            self._raw.close()
+
+
+def get_connection() -> Connection:
+    return Connection()
 
 
 _initialised = False
@@ -106,17 +161,29 @@ def init_db(force: bool = False) -> None:
         if _initialised and not force:
             return
         with get_connection() as conn:
-            # WAL lets readers proceed during a write — worth having as soon as
-            # requests are served concurrently.
-            conn.execute("PRAGMA journal_mode = WAL")
-            conn.execute("PRAGMA synchronous = NORMAL")
-            conn.executescript(SCHEMA)
-            _apply_migrations(conn)
+            if IS_POSTGRES:
+                conn.executescript(SCHEMA_POSTGRES)
+            else:
+                # WAL keeps readers unblocked during writes under concurrency.
+                conn.execute("PRAGMA journal_mode = WAL")
+                conn.execute("PRAGMA synchronous = NORMAL")
+                conn.executescript(SCHEMA_SQLITE)
+                _migrate_sqlite(conn)
         _initialised = True
 
 
-def row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
-    return {key: row[key] for key in row.keys()}
+def _migrate_sqlite(conn: Connection) -> None:
+    """Add columns to pre-existing SQLite databases (Postgres starts current)."""
+    existing = {r["name"] for r in conn.execute("PRAGMA table_info(auth_accounts)")}
+    if "email" not in existing:
+        conn.execute("ALTER TABLE auth_accounts ADD COLUMN email TEXT")
+
+
+def row_to_dict(row) -> Dict[str, Any]:
+    return dict(row) if row is not None else {}
+
+
+# --- user store (User Management Agent's tools) ------------------------------
 
 
 def insert_user(
@@ -128,13 +195,11 @@ def insert_user(
 ) -> Dict[str, Any]:
     ts = _now()
     with get_connection() as conn:
-        cur = conn.execute(
+        row = conn.execute(
             "INSERT INTO users (name, email, phone, department, skills, created_at, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            " VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *",
             (name, email, phone, department, skills, ts, ts),
-        )
-        user_id = cur.lastrowid
-        row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        ).fetchone()
     return row_to_dict(row)
 
 
@@ -168,7 +233,7 @@ def update_user_fields(user_id: int, updates: Dict[str, Any]) -> Dict[str, Any]:
     params = list(updates.values()) + [_now(), user_id]
     with get_connection() as conn:
         conn.execute(
-            f"UPDATE users SET {assignments}, updated_at = ? WHERE id = ?", params
+            f"UPDATE users SET {assignments}, updated_at = ? WHERE id = ?", tuple(params)
         )
         row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
     return row_to_dict(row)
