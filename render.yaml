@@ -31,6 +31,10 @@ services:
         generateValue: true
       - key: COOKIE_SECURE
         value: "true"
+      # Open self-service signup so new users anywhere can register.
+      # Optionally gate it with a shared code by setting AUTH_SIGNUP_CODE.
+      - key: AUTH_ALLOW_SIGNUP
+        value: "true"
       # --- email ---
       - key: EMAIL_ENABLED
         value: "true"
