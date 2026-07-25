@@ -92,20 +92,48 @@ class _Result:
         return iter(self._rows)
 
 
+# A pooled Postgres connection is reused across requests, avoiding a fresh TLS
+# handshake per query — a big win when the database is a hosted Postgres some
+# distance away (e.g. Neon). SQLite opens a local file, so it needs no pool.
+_pg_pool = None
+_pg_pool_lock = threading.Lock()
+
+
+def _pool():
+    global _pg_pool
+    if _pg_pool is None:
+        with _pg_pool_lock:
+            if _pg_pool is None:
+                from psycopg_pool import ConnectionPool
+
+                _pg_pool = ConnectionPool(
+                    DATABASE_URL, min_size=1, max_size=8, timeout=30, open=True
+                )
+    return _pg_pool
+
+
 class Connection:
-    """Uniform connection over sqlite3 or psycopg, used as a context manager."""
+    """Uniform connection over sqlite3 or pooled psycopg, as a context manager.
 
-    def __init__(self):
+    The connection is acquired on `__enter__` (borrowed from the pool for
+    Postgres) and released on `__exit__`, committing on success and rolling back
+    on error.
+    """
+
+    _raw = None
+    _pool_ctx = None
+
+    def __enter__(self) -> "Connection":
         if IS_POSTGRES:
-            import psycopg
-
-            self._raw = psycopg.connect(DATABASE_URL, autocommit=False)
+            self._pool_ctx = _pool().connection()
+            self._raw = self._pool_ctx.__enter__()
         else:
             import sqlite3
 
             self._raw = sqlite3.connect(DB_PATH, timeout=15.0)
             self._raw.row_factory = sqlite3.Row
             self._raw.execute("PRAGMA foreign_keys = ON")
+        return self
 
     def execute(self, sql: str, params: tuple = ()) -> _Result:
         if IS_POSTGRES:
@@ -131,17 +159,18 @@ class Connection:
         else:
             self._raw.executescript(script)
 
-    def __enter__(self) -> "Connection":
-        return self
-
     def __exit__(self, exc_type, exc, tb) -> None:
-        try:
-            if exc_type:
-                self._raw.rollback()
-            else:
-                self._raw.commit()
-        finally:
-            self._raw.close()
+        if IS_POSTGRES:
+            # The pool's context commits/rolls back and returns the connection.
+            self._pool_ctx.__exit__(exc_type, exc, tb)
+        else:
+            try:
+                if exc_type:
+                    self._raw.rollback()
+                else:
+                    self._raw.commit()
+            finally:
+                self._raw.close()
 
 
 def get_connection() -> Connection:

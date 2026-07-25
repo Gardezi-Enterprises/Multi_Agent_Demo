@@ -8,7 +8,7 @@ python-multipart>=0.0.9   # multipart/form-data (file uploads)
 
 # Database — SQLite (built in) is the default; psycopg enables PostgreSQL when
 # DATABASE_URL is a postgres:// URL (free Neon / Supabase, etc.)
-psycopg[binary]>=3.1
+psycopg[binary,pool]>=3.1
 
 # Tooling
 python-docx>=1.1.0        # resume document generation

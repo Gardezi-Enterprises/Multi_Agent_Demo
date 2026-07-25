@@ -573,13 +573,14 @@ async def chat_stream(body: ChatBody, account: dict = Depends(require_user)):
             429, f"Rate limit reached ({RATE_LIMIT_TURNS} messages per "
             f"{RATE_LIMIT_WINDOW}s). Please wait a moment.")
 
-    # Resolve the target conversation, enforcing ownership. An unknown or
-    # someone-else's id never resolves — a fresh conversation is created instead,
-    # so a user can only ever write to their own history.
+    # Resolve the target conversation, enforcing ownership. get_messages returns
+    # None for an unknown or someone-else's id, so we create a fresh conversation
+    # in that case — a user can only ever write to their own history.
     conv_id = body.conversation_id.strip()
-    if not conv_id or not conversations.owns(owner, conv_id):
+    prior = conversations.get_messages(owner, conv_id) if conv_id else None
+    if prior is None:
         conv_id = conversations.create(owner)["id"]
-    prior = conversations.get_messages(owner, conv_id) or []
+        prior = []
 
     loop = asyncio.get_running_loop()
     bridge: asyncio.Queue = asyncio.Queue()
