@@ -8,7 +8,6 @@ export function Signup({ isFirst, onAuthed }: { isFirst: boolean; onAuthed: () =
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [code, setCode] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const navigate = useNavigate();
@@ -18,7 +17,7 @@ export function Signup({ isFirst, onAuthed }: { isFirst: boolean; onAuthed: () =
     setBusy(true);
     setError("");
     try {
-      await api.signup(username, password, email, code);
+      await api.signup(username, password, email, "");
       onAuthed();
       navigate("/");
     } catch (err) {
@@ -71,12 +70,6 @@ export function Signup({ isFirst, onAuthed }: { isFirst: boolean; onAuthed: () =
               onChange={(e) => setPassword(e.target.value)}
               required
             />
-            {!isFirst && (
-              <>
-                <label htmlFor="c">Invite code</label>
-                <input id="c" value={code} onChange={(e) => setCode(e.target.value)} />
-              </>
-            )}
             <button className="primary" type="submit" disabled={busy}>
               {busy ? "Creating…" : "Create account"}
             </button>
